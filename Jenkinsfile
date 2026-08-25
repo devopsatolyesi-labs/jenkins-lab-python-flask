@@ -21,8 +21,8 @@ pipeline {
         script {
           def gitSha = sh(script: 'git rev-parse --short=12 HEAD', returnStdout: true).trim()
           env.RESOLVED_IMAGE_TAG = params.IMAGE_TAG?.trim() ? params.IMAGE_TAG.trim() : "${env.BUILD_NUMBER}-${gitSha}"
-          env.EFFECTIVE_REGISTRY_URL = params.REGISTRY_URL?.trim() ?: (env.REGISTRY_URL ?: '').trim()
-          env.EFFECTIVE_REGISTRY_CREDENTIALS_ID = params.REGISTRY_CREDENTIALS_ID?.trim() ?: (env.REGISTRY_CREDENTIALS_ID ?: '').trim()
+          env.EFFECTIVE_REGISTRY_URL = params.REGISTRY_URL?.trim() ?: (System.getenv('REGISTRY_URL') ?: '').trim()
+          env.EFFECTIVE_REGISTRY_CREDENTIALS_ID = params.REGISTRY_CREDENTIALS_ID?.trim() ?: (System.getenv('REGISTRY_CREDENTIALS_ID') ?: '').trim()
           env.IMAGE_REF = env.EFFECTIVE_REGISTRY_URL ? "${env.EFFECTIVE_REGISTRY_URL}/${params.IMAGE_NAME}:${env.RESOLVED_IMAGE_TAG}" : "${params.IMAGE_NAME}:${env.RESOLVED_IMAGE_TAG}"
         }
       }
@@ -30,7 +30,7 @@ pipeline {
     stage('Unit Tests') { steps { sh 'docker build --target test -t jenkins-lab-python-flask-test:${RESOLVED_IMAGE_TAG} .' } }
     stage('Docker Build') { steps { sh 'docker build --target runtime -t "$IMAGE_REF" .' } }
     stage('Trivy Scan') {
-      when { expression { return params.TRIVY_ENABLED || env.TRIVY_ENABLED == 'true' } }
+      when { expression { return params.TRIVY_ENABLED || System.getenv('TRIVY_ENABLED') == 'true' } }
       steps {
         sh '''#!/bin/sh
           set -eu
@@ -62,8 +62,8 @@ pipeline {
       }
     }
     stage('Trigger External CD') {
-      when { expression { return env.CD_JOB_NAME?.trim() && env.EFFECTIVE_REGISTRY_URL } }
-      steps { build job: env.CD_JOB_NAME, parameters: [string(name: 'IMAGE_TAG', value: "${env.RESOLVED_IMAGE_TAG}")], wait: false }
+      when { expression { return System.getenv('CD_JOB_NAME')?.trim() && env.EFFECTIVE_REGISTRY_URL } }
+      steps { build job: System.getenv('CD_JOB_NAME'), parameters: [string(name: 'IMAGE_TAG', value: "${env.RESOLVED_IMAGE_TAG}")], wait: false }
     }
   }
 }
