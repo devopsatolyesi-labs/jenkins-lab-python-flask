@@ -1,0 +1,7 @@
+pipeline {
+  agent any
+  stages {
+    stage('Checkout') { steps { checkout scm } }
+    stage('Unit Tests') { steps { sh 'docker build --target test -t jenkins-lab-python-flask-test:${BUILD_NUMBER} .' } }
+  }
+}

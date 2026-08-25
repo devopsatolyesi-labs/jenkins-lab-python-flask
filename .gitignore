@@ -1,0 +1,7 @@
+.env
+generated/*
+!generated/.gitkeep
+jenkins_home/
+nexus-data/
+*.log
+.DS_Store
