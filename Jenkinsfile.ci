@@ -29,7 +29,14 @@ pipeline {
     stage('Docker Build') { steps { sh 'docker build --target runtime -t "$IMAGE_REF" .' } }
     stage('Trivy Scan') {
       when { expression { return params.TRIVY_ENABLED || env.TRIVY_ENABLED == 'true' } }
-      steps { sh 'trivy image --exit-code 0 "$IMAGE_REF"' }
+      steps {
+        sh '''#!/bin/sh
+          set -eu
+          docker run --rm --network "${TRIVY_DOCKER_NETWORK:-bridge}" -v /certs/client:/certs/client:ro \
+            -e DOCKER_HOST -e DOCKER_TLS_VERIFY -e DOCKER_CERT_PATH \
+            "${TRIVY_IMAGE:-ghcr.io/aquasecurity/trivy:0.68.2}" image --exit-code 0 "$IMAGE_REF"
+        '''
+      }
     }
     stage('Registry Push') {
       when { expression { return env.EFFECTIVE_REGISTRY_URL } }

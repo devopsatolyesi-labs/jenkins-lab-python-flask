@@ -41,7 +41,8 @@ the included Kubernetes manifests, waits for rollout, smoke-tests it, and
 attempts rollback on failure. It deliberately never rebuilds the image.
 An administrator may set the optional `CD_JOB_NAME`, `REGISTRY_URL`, and
 `TRIVY_ENABLED` controller environment variables to connect a platform job;
-the repository itself remains usable without them.
+`TRIVY_IMAGE` and `TRIVY_DOCKER_NETWORK` are optional when Trivy must talk to
+a remote Docker daemon. The repository itself remains usable without them.
 
 The default pipeline already contains the optional Kubernetes deploy stage.
 Adapt registry and deployment values to your own environment.
