@@ -1,0 +1,65 @@
+pipeline {
+  agent any
+  options { timestamps(); disableConcurrentBuilds() }
+  environment { IMAGE_REF = "${NEXUS_REGISTRY}/${NEXUS_REPOSITORY}:${params.IMAGE_TAG}" }
+  stages {
+    stage('Validate Parameters') { steps { script { if (!params.IMAGE_TAG?.trim()) { error('IMAGE_TAG is required; CD never rebuilds an image.') } } } }
+    stage('Verify Nexus Artifact') {
+      steps {
+        withCredentials([usernamePassword(credentialsId: 'nexus-docker-credentials', usernameVariable: 'NEXUS_USER', passwordVariable: 'NEXUS_PASSWORD')]) {
+          sh '''#!/bin/sh
+            set -eu
+            printf '%s' "$NEXUS_PASSWORD" | docker login nexus:8082 --username "$NEXUS_USER" --password-stdin
+            docker pull "$IMAGE_REF"
+          '''
+        }
+      }
+    }
+    stage('Deploy to Kubernetes') {
+      steps {
+        sh '''#!/bin/sh
+          set -eu
+          kubectl apply -f k8s/namespace.yaml
+          kubectl apply -f k8s/service.yaml
+          kubectl apply -f k8s/deployment.yaml
+          kubectl -n jenkins-lab set image deployment/flask-app flask-app="$IMAGE_REF"
+          kubectl -n jenkins-lab set env deployment/flask-app APP_VERSION="${IMAGE_TAG}"
+        '''
+      }
+    }
+    stage('Rollout Status') { steps { sh 'kubectl -n jenkins-lab rollout status deployment/flask-app --timeout=120s' } }
+    stage('Smoke Test') {
+      steps {
+        sh '''#!/bin/sh
+          set -eu
+          attempt=1
+          while [ "$attempt" -le 15 ]; do
+            if health="$(kubectl -n jenkins-lab exec deployment/flask-app -- wget -qO- http://flask-app:8080/health 2>/dev/null)" \
+              && version="$(kubectl -n jenkins-lab exec deployment/flask-app -- wget -qO- http://flask-app:8080/version 2>/dev/null)" \
+              && printf '%s' "$health" | jq -e '.status == "healthy"' >/dev/null \
+              && printf '%s' "$version" | jq -e --arg v "$IMAGE_TAG" '.version == $v' >/dev/null; then
+              exit 0
+            fi
+            printf 'Smoke test not ready (attempt %s/15); retrying.\\n' "$attempt"
+            attempt=$((attempt + 1))
+            sleep 2
+          done
+          printf 'Smoke test never reached the expected deployment version.\\n' >&2
+          exit 1
+        '''
+      }
+    }
+  }
+  post {
+    failure {
+      script {
+        def revisions = sh(script: 'kubectl -n jenkins-lab rollout history deployment/flask-app 2>/dev/null | grep -c "^[[:space:]]*[0-9]" || true', returnStdout: true).trim().toInteger()
+        // The manifest + set-image sequence creates two revisions on a first deployment.
+        if (revisions > 2) {
+          echo 'Deployment failed; rolling back to the previous revision.'
+          sh 'kubectl -n jenkins-lab rollout undo deployment/flask-app && kubectl -n jenkins-lab rollout status deployment/flask-app --timeout=120s'
+        } else { echo 'Deployment failed on first revision; no prior revision exists to roll back to.' }
+      }
+    }
+  }
+}

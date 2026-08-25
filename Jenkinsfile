@@ -21,22 +21,24 @@ pipeline {
         script {
           def gitSha = sh(script: 'git rev-parse --short=12 HEAD', returnStdout: true).trim()
           env.RESOLVED_IMAGE_TAG = params.IMAGE_TAG?.trim() ? params.IMAGE_TAG.trim() : "${env.BUILD_NUMBER}-${gitSha}"
-          env.IMAGE_REF = params.REGISTRY_URL?.trim() ? "${params.REGISTRY_URL.trim()}/${params.IMAGE_NAME}:${env.RESOLVED_IMAGE_TAG}" : "${params.IMAGE_NAME}:${env.RESOLVED_IMAGE_TAG}"
+          env.EFFECTIVE_REGISTRY_URL = params.REGISTRY_URL?.trim() ?: (env.REGISTRY_URL ?: '').trim()
+          env.EFFECTIVE_REGISTRY_CREDENTIALS_ID = params.REGISTRY_CREDENTIALS_ID?.trim() ?: (env.REGISTRY_CREDENTIALS_ID ?: '').trim()
+          env.IMAGE_REF = env.EFFECTIVE_REGISTRY_URL ? "${env.EFFECTIVE_REGISTRY_URL}/${params.IMAGE_NAME}:${env.RESOLVED_IMAGE_TAG}" : "${params.IMAGE_NAME}:${env.RESOLVED_IMAGE_TAG}"
         }
       }
     }
     stage('Unit Tests') { steps { sh 'docker build --target test -t jenkins-lab-python-flask-test:${RESOLVED_IMAGE_TAG} .' } }
     stage('Docker Build') { steps { sh 'docker build --target runtime -t "$IMAGE_REF" .' } }
     stage('Trivy Scan') {
-      when { expression { return params.TRIVY_ENABLED } }
+      when { expression { return params.TRIVY_ENABLED || env.TRIVY_ENABLED == 'true' } }
       steps { sh 'trivy image --exit-code 0 "$IMAGE_REF"' }
     }
     stage('Registry Push') {
-      when { expression { return params.REGISTRY_URL?.trim() } }
+      when { expression { return env.EFFECTIVE_REGISTRY_URL } }
       steps {
-        script { if (!params.REGISTRY_CREDENTIALS_ID?.trim()) { error('REGISTRY_CREDENTIALS_ID is required when REGISTRY_URL is set.') } }
-        withCredentials([usernamePassword(credentialsId: "${params.REGISTRY_CREDENTIALS_ID}", usernameVariable: 'REGISTRY_USER', passwordVariable: 'REGISTRY_PASSWORD')]) {
-          sh 'printf %s "$REGISTRY_PASSWORD" | docker login "$REGISTRY_URL" --username "$REGISTRY_USER" --password-stdin && docker push "$IMAGE_REF"'
+        script { if (!env.EFFECTIVE_REGISTRY_CREDENTIALS_ID) { error('REGISTRY_CREDENTIALS_ID is required when REGISTRY_URL is set.') } }
+        withCredentials([usernamePassword(credentialsId: "${env.EFFECTIVE_REGISTRY_CREDENTIALS_ID}", usernameVariable: 'REGISTRY_USER', passwordVariable: 'REGISTRY_PASSWORD')]) {
+          sh 'printf %s "$REGISTRY_PASSWORD" | docker login "$EFFECTIVE_REGISTRY_URL" --username "$REGISTRY_USER" --password-stdin && docker push "$IMAGE_REF"'
         }
       }
     }
@@ -44,13 +46,17 @@ pipeline {
       when { expression { return params.DEPLOY_TARGET == 'kubernetes' } }
       steps {
         script {
-          if (!params.REGISTRY_URL?.trim()) { error('REGISTRY_URL is required for Kubernetes deployment.') }
+          if (!env.EFFECTIVE_REGISTRY_URL) { error('REGISTRY_URL is required for Kubernetes deployment.') }
           if (!params.KUBE_CONFIG_CREDENTIAL_ID?.trim()) { error('KUBE_CONFIG_CREDENTIAL_ID is required for Kubernetes deployment.') }
         }
         withCredentials([file(credentialsId: "${params.KUBE_CONFIG_CREDENTIAL_ID}", variable: 'KUBECONFIG')]) {
           sh 'kubectl -n "$K8S_NAMESPACE" create deployment "$IMAGE_NAME" --image="$IMAGE_REF" --dry-run=client -o yaml | kubectl apply -f - && kubectl -n "$K8S_NAMESPACE" rollout status deployment/"$IMAGE_NAME" --timeout=120s'
         }
       }
+    }
+    stage('Trigger External CD') {
+      when { expression { return env.CD_JOB_NAME?.trim() && env.EFFECTIVE_REGISTRY_URL } }
+      steps { build job: env.CD_JOB_NAME, parameters: [string(name: 'IMAGE_TAG', value: "${env.RESOLVED_IMAGE_TAG}")], wait: false }
     }
   }
 }

@@ -35,5 +35,13 @@ password. For Kubernetes, use a least-privileged kubeconfig stored as a
 secret-file credential. Set `TRIVY_ENABLED=true` only on an agent that has
 Trivy available.
 
+`jenkins/pipelines/Jenkinsfile.cd` is an optional deploy-only pipeline: it
+accepts an existing `IMAGE_TAG`, pulls the exact registry artifact, applies
+the included Kubernetes manifests, waits for rollout, smoke-tests it, and
+attempts rollback on failure. It deliberately never rebuilds the image.
+An administrator may set the optional `CD_JOB_NAME`, `REGISTRY_URL`, and
+`TRIVY_ENABLED` controller environment variables to connect a platform job;
+the repository itself remains usable without them.
+
 The default pipeline already contains the optional Kubernetes deploy stage.
 Adapt registry and deployment values to your own environment.
