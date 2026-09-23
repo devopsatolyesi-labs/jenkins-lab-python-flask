@@ -1,43 +1,26 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: flask-app
-  namespace: jenkins-lab
+  name: python-flask
+  namespace: student-python-lab
 spec:
   replicas: 2
   selector:
     matchLabels:
-      app: flask-app
+      app: python-flask
   template:
     metadata:
       labels:
-        app: flask-app
+        app: python-flask
     spec:
-      imagePullSecrets:
-        - name: nexus-regcred
-      securityContext:
-        runAsNonRoot: true
       containers:
-        - name: flask-app
-          image: nexus:8082/jenkins-lab/flask-app:placeholder
-          imagePullPolicy: Always
+        - name: python-flask
+          image: __IMAGE_REF__
           ports:
             - containerPort: 8080
-          env:
-            - name: APP_VERSION
-              value: placeholder
           readinessProbe:
-            httpGet: { path: /health, port: 8080 }
+            httpGet:
+              path: /health
+              port: 8080
             initialDelaySeconds: 3
-            periodSeconds: 5
-          livenessProbe:
-            httpGet: { path: /health, port: 8080 }
-            initialDelaySeconds: 10
-            periodSeconds: 10
-          resources:
-            requests: { cpu: 50m, memory: 64Mi }
-            limits: { cpu: 250m, memory: 256Mi }
-          securityContext:
-            allowPrivilegeEscalation: false
-            readOnlyRootFilesystem: false
-            capabilities: { drop: ["ALL"] }
+            periodSeconds: 3

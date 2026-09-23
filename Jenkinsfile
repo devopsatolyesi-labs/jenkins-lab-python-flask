@@ -1,70 +1,93 @@
-// Default standalone pipeline. See Jenkinsfile.basic for the first exercise.
-// Jenkinsfile.ci is intentionally self-contained so this file remains usable
-// when pasted into a normal Pipeline job.
 pipeline {
   agent any
-  options { timestamps(); disableConcurrentBuilds() }
-  parameters {
-    string(name: 'REGISTRY_URL', defaultValue: '', description: 'Optional Docker registry host')
-    string(name: 'REGISTRY_CREDENTIALS_ID', defaultValue: '', description: 'Jenkins credential ID for REGISTRY_URL')
-    string(name: 'IMAGE_NAME', defaultValue: 'jenkins-lab-python-flask', description: 'Image repository/name')
-    string(name: 'IMAGE_TAG', defaultValue: '', description: 'Optional immutable image tag')
-    choice(name: 'DEPLOY_TARGET', choices: ['none', 'kubernetes'], description: 'Deployment target')
-    string(name: 'K8S_NAMESPACE', defaultValue: 'default', description: 'Kubernetes namespace')
-    string(name: 'KUBE_CONFIG_CREDENTIAL_ID', defaultValue: '', description: 'Secret-file credential ID containing kubeconfig')
-    booleanParam(name: 'TRIVY_ENABLED', defaultValue: false, description: 'Run Trivy when available')
-    string(name: 'CD_JOB_NAME', defaultValue: '', description: 'Optional downstream CD job name')
+
+  options {
+    disableConcurrentBuilds()
+    timeout(time: 20, unit: 'MINUTES')
   }
+
+  environment {
+    DOCKERHUB_USERNAME = 'hbayraktar'
+    DOCKERHUB_CREDENTIALS_ID = 'dockerhub-creds'
+    KUBECONFIG_CREDENTIALS_ID = 'kubeconfig-student-kind'
+    LOCAL_CONTAINER = 'student-python-flask'
+    LOCAL_PORT = '19004'
+    K8S_NAMESPACE = 'student-python-lab'
+  }
+
   stages {
-    stage('Checkout') { steps { checkout scm } }
-    stage('Metadata') {
+    stage('Checkout') {
+      steps { checkout scm }
+    }
+
+    stage('Image Etiketi') {
       steps {
         script {
-          def gitSha = sh(script: 'git rev-parse --short=12 HEAD', returnStdout: true).trim()
-          env.RESOLVED_IMAGE_TAG = params.IMAGE_TAG?.trim() ? params.IMAGE_TAG.trim() : "${env.BUILD_NUMBER}-${gitSha}"
-          env.EFFECTIVE_REGISTRY_URL = params.REGISTRY_URL?.trim()
-          env.EFFECTIVE_REGISTRY_CREDENTIALS_ID = params.REGISTRY_CREDENTIALS_ID?.trim()
-          env.IMAGE_REF = env.EFFECTIVE_REGISTRY_URL ? "${env.EFFECTIVE_REGISTRY_URL}/${params.IMAGE_NAME}:${env.RESOLVED_IMAGE_TAG}" : "${params.IMAGE_NAME}:${env.RESOLVED_IMAGE_TAG}"
+          env.GIT_SHA = sh(script: 'git rev-parse --short HEAD', returnStdout: true).trim()
+          env.IMAGE_REF = "${env.DOCKERHUB_USERNAME}/jenkins-lab-python-flask:v${env.BUILD_NUMBER}-${env.GIT_SHA}"
         }
       }
     }
-    stage('Unit Tests') { steps { sh 'docker build --target test -t jenkins-lab-python-flask-test:${RESOLVED_IMAGE_TAG} .' } }
-    stage('Docker Build') { steps { sh 'docker build --target runtime -t "$IMAGE_REF" .' } }
-    stage('Trivy Scan') {
-      when { expression { return params.TRIVY_ENABLED } }
+
+    stage('Python Testleri') {
+      steps { sh 'docker build --target test -t python-flask-test:${BUILD_NUMBER} .' }
+    }
+
+    stage('Docker Image Build') {
+      steps { sh 'docker build --target runtime -t ${IMAGE_REF} .' }
+    }
+
+    stage('Docker Huba Public Push') {
       steps {
-        sh '''#!/bin/sh
+        withCredentials([usernamePassword(credentialsId: env.DOCKERHUB_CREDENTIALS_ID, usernameVariable: 'DOCKERHUB_USER', passwordVariable: 'DOCKERHUB_TOKEN')]) {
+          sh '''
+            set -eu
+            test "$DOCKERHUB_USER" = "$DOCKERHUB_USERNAME"
+            printf '%s' "$DOCKERHUB_TOKEN" | docker login --username "$DOCKERHUB_USER" --password-stdin
+            docker push "$IMAGE_REF"
+            docker logout
+          '''
+        }
+      }
+    }
+
+    stage('Ayni Makinede Docker Deploy') {
+      steps {
+        sh '''
           set -eu
-          docker run --rm --network "${TRIVY_DOCKER_NETWORK:-bridge}" -v /certs/client:/certs/client:ro \
-            -e DOCKER_HOST -e DOCKER_TLS_VERIFY -e DOCKER_CERT_PATH \
-            "${TRIVY_IMAGE:-ghcr.io/aquasecurity/trivy:0.68.2}" image --exit-code 0 "$IMAGE_REF"
+          docker rm -f "$LOCAL_CONTAINER" 2>/dev/null || true
+          docker run -d --name "$LOCAL_CONTAINER" -p "127.0.0.1:${LOCAL_PORT}:8080" "$IMAGE_REF"
+          for attempt in 1 2 3 4 5; do
+            if docker exec "$LOCAL_CONTAINER" wget -qO- http://127.0.0.1:8080/health | grep -q healthy; then exit 0; fi
+            sleep 1
+          done
+          docker logs "$LOCAL_CONTAINER"
+          exit 1
         '''
       }
     }
-    stage('Registry Push') {
-      when { expression { return env.EFFECTIVE_REGISTRY_URL } }
+
+    stage('KinD Kubernetes Deploy') {
       steps {
-        script { if (!env.EFFECTIVE_REGISTRY_CREDENTIALS_ID) { error('REGISTRY_CREDENTIALS_ID is required when REGISTRY_URL is set.') } }
-        withCredentials([usernamePassword(credentialsId: "${env.EFFECTIVE_REGISTRY_CREDENTIALS_ID}", usernameVariable: 'REGISTRY_USER', passwordVariable: 'REGISTRY_PASSWORD')]) {
-          sh 'printf %s "$REGISTRY_PASSWORD" | docker login "$EFFECTIVE_REGISTRY_URL" --username "$REGISTRY_USER" --password-stdin && docker push "$IMAGE_REF"'
+        withCredentials([file(credentialsId: env.KUBECONFIG_CREDENTIALS_ID, variable: 'KUBECONFIG')]) {
+          sh '''
+            set -eu
+            kubectl --kubeconfig "$KUBECONFIG" apply -f k8s/namespace.yaml
+            sed "s|__IMAGE_REF__|$IMAGE_REF|g" k8s/deployment.yaml | kubectl --kubeconfig "$KUBECONFIG" apply -f -
+            kubectl --kubeconfig "$KUBECONFIG" apply -f k8s/service.yaml
+            kubectl --kubeconfig "$KUBECONFIG" apply -f k8s/ingress.yaml
+            kubectl --kubeconfig "$KUBECONFIG" -n "$K8S_NAMESPACE" rollout status deployment/python-flask --timeout=120s
+            kubectl --kubeconfig "$KUBECONFIG" -n "$K8S_NAMESPACE" exec deployment/python-flask -- wget -qO- http://127.0.0.1:8080/health | grep -q healthy
+          '''
         }
       }
     }
-    stage('Kubernetes Deploy') {
-      when { expression { return params.DEPLOY_TARGET == 'kubernetes' } }
-      steps {
-        script {
-          if (!env.EFFECTIVE_REGISTRY_URL) { error('REGISTRY_URL is required for Kubernetes deployment.') }
-          if (!params.KUBE_CONFIG_CREDENTIAL_ID?.trim()) { error('KUBE_CONFIG_CREDENTIAL_ID is required for Kubernetes deployment.') }
-        }
-        withCredentials([file(credentialsId: "${params.KUBE_CONFIG_CREDENTIAL_ID}", variable: 'KUBECONFIG')]) {
-          sh 'kubectl -n "$K8S_NAMESPACE" create deployment "$IMAGE_NAME" --image="$IMAGE_REF" --dry-run=client -o yaml | kubectl apply -f - && kubectl -n "$K8S_NAMESPACE" rollout status deployment/"$IMAGE_NAME" --timeout=120s'
-        }
-      }
-    }
-    stage('Trigger External CD') {
-      when { expression { return params.CD_JOB_NAME?.trim() && env.EFFECTIVE_REGISTRY_URL } }
-      steps { build job: params.CD_JOB_NAME, parameters: [string(name: 'IMAGE_TAG', value: "${env.RESOLVED_IMAGE_TAG}")], wait: false }
+  }
+
+  post {
+    success {
+      echo 'Docker: http://127.0.0.1:19004/health'
+      echo 'KinD:   https://student101-app1.devopsatolyesi.com/health'
     }
   }
 }

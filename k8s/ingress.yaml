@@ -1,0 +1,18 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: python-flask
+  namespace: student-python-lab
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: student101-app1.devopsatolyesi.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: python-flask
+                port:
+                  number: 8080
