@@ -6,7 +6,7 @@ metadata:
 spec:
   ingressClassName: nginx
   rules:
-    - host: student101-app1.devopsatolyesi.com
+    - host: __APP_HOST__
       http:
         paths:
           - path: /

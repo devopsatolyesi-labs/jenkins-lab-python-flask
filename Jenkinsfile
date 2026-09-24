@@ -6,10 +6,14 @@ pipeline {
     timeout(time: 20, unit: 'MINUTES')
   }
 
+  parameters {
+    string(name: 'STUDENT_NO', defaultValue: '101', description: 'Öğrenci numaranız (Örn: 101, 1, 2 vb.)')
+    string(name: 'DOCKERHUB_USERNAME', defaultValue: 'hbayraktar', description: 'Docker Hub kullanıcı adınız')
+    string(name: 'DOCKERHUB_CREDENTIALS_ID', defaultValue: 'dockerhub-creds', description: 'Jenkins Username with password credential ID')
+    string(name: 'KUBECONFIG_CREDENTIALS_ID', defaultValue: 'kubeconfig-student-kind', description: 'Jenkins Secret file credential ID')
+  }
+
   environment {
-    DOCKERHUB_USERNAME = 'hbayraktar'
-    DOCKERHUB_CREDENTIALS_ID = 'dockerhub-creds'
-    KUBECONFIG_CREDENTIALS_ID = 'kubeconfig-student-kind'
     LOCAL_CONTAINER = 'student-python-flask'
     LOCAL_PORT = '19004'
     K8S_NAMESPACE = 'student-python-lab'
@@ -20,11 +24,20 @@ pipeline {
       steps { checkout scm }
     }
 
-    stage('Image Etiketi') {
+    stage('Parametreler ve İmaj Etiketi') {
       steps {
         script {
+          def std = params.STUDENT_NO?.trim() ?: '101'
+          if (std.startsWith('student')) {
+            env.APP_HOST = "${std}-app1.devopsatolyesi.com"
+          } else {
+            env.APP_HOST = "student${std}-app1.devopsatolyesi.com"
+          }
+          env.DH_USER = params.DOCKERHUB_USERNAME?.trim() ?: 'hbayraktar'
           env.GIT_SHA = sh(script: 'git rev-parse --short HEAD', returnStdout: true).trim()
-          env.IMAGE_REF = "${env.DOCKERHUB_USERNAME}/jenkins-lab-python-flask:v${env.BUILD_NUMBER}-${env.GIT_SHA}"
+          env.IMAGE_REF = "${env.DH_USER}/jenkins-lab-python-flask:v${env.BUILD_NUMBER}-${env.GIT_SHA}"
+          echo "Öğrenci Host Adı: ${env.APP_HOST}"
+          echo "Hedef İmaj:       ${env.IMAGE_REF}"
         }
       }
     }
@@ -39,10 +52,10 @@ pipeline {
 
     stage('Docker Huba Public Push') {
       steps {
-        withCredentials([usernamePassword(credentialsId: env.DOCKERHUB_CREDENTIALS_ID, usernameVariable: 'DOCKERHUB_USER', passwordVariable: 'DOCKERHUB_TOKEN')]) {
+        withCredentials([usernamePassword(credentialsId: params.DOCKERHUB_CREDENTIALS_ID, usernameVariable: 'DOCKERHUB_USER', passwordVariable: 'DOCKERHUB_TOKEN')]) {
           sh '''
             set -eu
-            test "$DOCKERHUB_USER" = "$DOCKERHUB_USERNAME"
+            test "$DOCKERHUB_USER" = "$DH_USER"
             printf '%s' "$DOCKERHUB_TOKEN" | docker login --username "$DOCKERHUB_USER" --password-stdin
             docker push "$IMAGE_REF"
             docker logout
@@ -69,13 +82,13 @@ pipeline {
 
     stage('KinD Kubernetes Deploy') {
       steps {
-        withCredentials([file(credentialsId: env.KUBECONFIG_CREDENTIALS_ID, variable: 'KUBECONFIG')]) {
+        withCredentials([file(credentialsId: params.KUBECONFIG_CREDENTIALS_ID, variable: 'KUBECONFIG')]) {
           sh '''
             set -eu
             kubectl --kubeconfig "$KUBECONFIG" apply -f k8s/namespace.yaml
             sed "s|__IMAGE_REF__|$IMAGE_REF|g" k8s/deployment.yaml | kubectl --kubeconfig "$KUBECONFIG" apply -f -
             kubectl --kubeconfig "$KUBECONFIG" apply -f k8s/service.yaml
-            kubectl --kubeconfig "$KUBECONFIG" apply -f k8s/ingress.yaml
+            sed "s|__APP_HOST__|$APP_HOST|g" k8s/ingress.yaml | kubectl --kubeconfig "$KUBECONFIG" apply -f -
             kubectl --kubeconfig "$KUBECONFIG" -n "$K8S_NAMESPACE" rollout status deployment/python-flask --timeout=120s
             kubectl --kubeconfig "$KUBECONFIG" -n "$K8S_NAMESPACE" exec deployment/python-flask -- wget -qO- http://127.0.0.1:8080/health | grep -q healthy
           '''
@@ -87,7 +100,8 @@ pipeline {
   post {
     success {
       echo 'Docker: http://127.0.0.1:19004/health'
-      echo 'KinD:   https://student101-app1.devopsatolyesi.com/health'
+      echo "KinD:   https://${env.APP_HOST}/"
+      echo "Health: https://${env.APP_HOST}/health"
     }
   }
 }
